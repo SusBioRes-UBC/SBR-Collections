@@ -34,9 +34,204 @@ from xlrd import open_workbook
 xlrd.xlsx.ensure_elementtree_imported(False, None)
 xlrd.xlsx.Element_has_iter = True
 
+
+class SeqImporter:
+	"""
+	Methods of this class:
+		- import_bkgr_db: import one or more background databases (e.g., ecoinvent3.5 in EcoSpold2 format, customized db using bw2 template)
+		- import_foreground_db: import a foreground database (e.g., inventory table of a product system of interest)
+
+	"""
+
+
+	def __init__ (self,project_name: str):
+		
+		"""
+		=================
+		set up the logger
+		=================
+		"""
+		# gets or creates a logger
+		self.logger = logging.getLogger(__name__)  
+
+		# set log level
+		self.logger.setLevel(logging.INFO)
+
+		# define file handler and set formatter
+		log_output_path = os.path.sep.join([config.LOG_OUTPUT_PATH,'log_seq_import.log'])
+		file_handler = logging.FileHandler(log_output_path)
+		formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(name)s : %(message)s')
+		file_handler.setFormatter(formatter)
+
+		# add file handler to logger
+		self.logger.addHandler(file_handler)  
+
+
+		"""
+		===========================
+		create a brightway2 project
+		===========================
+		"""
+		self.project_name = project_name
+		projects.set_current(self.project_name)
+		#print (projects.current)
+		
+		# set up default dataset (biosphere3) and LCIA methods for current project
+		# code below is almost the same as bw2io.bw2setup(), other than changing the argument of 'overwrite' to True to avoid
+		# the error msg when you have impact assessment methods installed from previous setup
+		if "biosphere3" in databases:
+			print("Biosphere database already present!!! No setup is needed")
+		else:
+			print("Creating default biosphere\n")
+			create_default_biosphere3()
+			print("Creating default LCIA methods\n")
+			create_default_lcia_methods(overwrite=True)
+			print("Creating core data migrations\n")
+			create_core_migrations()
+
+		
+		# get a copy of databases already imported
+		self.imported_db_lst = list(databases)
+		print(f"already imported databases: {self.imported_db_lst}")
+
+
+		"""
+		====================
+		initiate db mgmt obj
+		====================
+		"""
+		self.db_mgmt_obj = DB_mgmt(self.project_name) #initiate the DB_mgmt object will print the already imported db again
+
+
+	def import_bkgr_db (self,db_path_name_dict: Dict, db_match_dict: Dict):
+		
+		"""
+		==============================
+		import database(s) of interest
+		==============================
+		Params:
+			- db_path_name_dict: a dict storing name, path and type of the db to import, {db_name: (db_path, db_format, option_label)}
+			- db_match_dict: a dict storing the database name and fields to match, {db_name:('field_1','field_2',...)}
+		"""
+		
+		# import individual databases
+		# [caution] it is NOT guaranteed that "ground lvl" db (e.g., ecoinvent) is installed before customized db (which relies on it)
+		# 			which may lead to error --> so need to explicitly import "ground lvl" db in a separate call first
+		for db_name, (db_path, db_format, option_label) in db_path_name_dict.items():
+			if db_name in self.imported_db_lst: # skip this db if it is already imported
+				print(f"DATABASE {db_name} has been imported already!!!")
+				continue
+			elif db_format.lower() == 'ecospold2':
+				import_obj = SingleOutputEcospold2Importer(db_path,db_name, use_mp=False)
+				import_obj.apply_strategies()
+			elif db_format.lower() == 'bw2 template':
+				if option_label == None:
+					import_obj = ExcelImporter(db_path)
+					import_obj.apply_strategies()
+					# need to match database
+					for db_to_match_name,fields_to_match in db_match_dict.items():
+						if  db_to_match_name == 'self':
+							import_obj.match_database(fields=fields_to_match) #link with processes in other tabs, if any
+						else:
+							import_obj.match_database(db_to_match_name,fields=fields_to_match) #match processes in other db
+				elif option_label.lower() == "multicolumn":
+					# use the helper function to handle multiple columns (e.g., multiple amounts for the same LCI row)
+					import_obj = MultiColImporter(db_path, db_name, config.MULTICOL_START, config.EXC_ROW_START, 
+													config.DEFAULT_PROC_ATTR_DICT)
+					import_obj = import_obj.buildNimport_db(db_match_dict)
+
+			# write database
+			try:
+				import_obj.statistics()
+				import_obj.write_database()
+				self.db_mgmt_obj.imported_db_lst = list(databases) # update the list of db
+			except bw2data.errors.InvalidExchange:
+				print("exception for InvalidExchange is raised!!!")
+				self.logger.info("exception for InvalidExchange is raised!!!")
+				# log the unlinked exchanges
+				self.logger.info(f"the file path to the record of unlinked exchanges: {write_lci_matching(import_obj,db_name,only_unlinked=True)}")
+				# remove the db from bw.databases
+				self.db_mgmt_obj.imported_db_lst = list(databases) # update the list of db first
+				self.db_mgmt_obj.remove_db(db_name)
+			except Exception: # catch all other exceptions 
+				exceptiondata = traceback.format_exc().splitlines()
+				exceptionarray = [exceptiondata[-1]] + [exceptiondata[-2]] #get the error msg and last line of traceback (where the error occured)
+				print(f"[ERROR msg] {exceptionarray}")
+				# remove the db from bw.databases
+				self.db_mgmt_obj.imported_db_lst = list(databases) # update the list of db first
+				self.db_mgmt_obj.remove_db(db_name)
+
+		
+
+		# log all the db loaded
+		self.logger.info("=== DATABASE IMPORTED ===")
+		self.logger.info(list(databases))
+		self.logger.info(" ")
+
+
+	def import_foreground_db (self, foreground_db_path_name_dict: Dict, foreground_db_match_dict: Dict):
+		
+		"""
+		=========================================
+		import foreground data of the LCA project
+		=========================================
+		Params:
+			- foreground_db_path_name_dict: a dict storing name, path and type of the foreground db to import, {db_name: (db_path, db_format, option_label)}
+			- foreground_db_match_dict: a dict storing the database name and fields to match, {db_name:('field_1','field_2',...)}
+		[Caution]:
+			- this method is intended for importing ONE foreground db at a time
+		"""
+		
+		# uppack the tuple from the foreground_db_path_name_dict
+		foreground_db_name = list(foreground_db_path_name_dict.keys())[0] # [caution] this assumes there is only ONE foreground db to be imported
+		db_path, db_format, option_label = list(foreground_db_path_name_dict.values())[0] # need to convert the 'dict_value' object to a list first
+
+		# check if foreground db has already been imported
+		self.imported_db_lst = list(databases) # update the list of db first
+		if foreground_db_name in self.imported_db_lst: # skip this db if it is already imported
+				print(f"DATABASE {foreground_db_name} has been imported already!!!")
+		else:
+			import_foreground_obj=ExcelImporter(db_path)
+			import_foreground_obj.apply_strategies()
+
+			for db_to_match_name,fields_to_match in foreground_db_match_dict.items():
+				if db_to_match_name=='self':
+					import_foreground_obj.match_database(fields=fields_to_match) #link within the foreground processes
+				else:
+					import_foreground_obj.match_database(db_to_match_name,fields=fields_to_match) #match processes in other db
+			import_foreground_obj.statistics()
+
+			try:
+				import_foreground_obj.write_database()
+				self.db_mgmt_obj.imported_db_lst = list(databases) # update the list of db
+			except bw2data.errors.InvalidExchange:
+				print("exception for InvalidExchange is raised!!!")
+				self.logger.info("exception for InvalidExchange is raised!!!")
+				# log the unlinked exchanges
+				self.logger.info(f"the file path to the record of unlinked exchanges: {write_lci_matching(import_foreground_obj,foreground_db_name,only_unlinked=True)}")
+				# remove the db from bw.databases
+				self.db_mgmt_obj.imported_db_lst = list(databases) # update the list of db first
+				self.db_mgmt_obj.remove_db(foreground_db_name)
+			except Exception: # catch all other exceptions 
+				exceptiondata = traceback.format_exc().splitlines()
+				exceptionarray = [exceptiondata[-1]] + [exceptiondata[-2]] #get the error msg and last line of traceback (where the error occured)
+				print(f"[ERROR msg] {exceptionarray}")
+				# remove the db from bw.databases
+				self.db_mgmt_obj.imported_db_lst = list(databases) # update the list of db first
+				self.db_mgmt_obj.remove_db(db_name)
+
+		# log all the db loaded
+		self.logger.info("=== DATABASE IMPORTED ===")
+		self.logger.info(list(databases))
+		self.logger.info(" ")
+
+		# prepare the foregound db for lca calculation
+		self.foreground_db=Database(foreground_db_name)
+
+
 class MultiColImporter:
 	"""
-	creates an importer object to handle multiple columns (e.g., multiple entries of amount for each row of LCI)
+	creates an importer object to handle multiple columns (e.g., multiple entries of amount for each row of LCI) in a spreadsheet of invenotry table
 	"""
 
 	def __init__(self, wb_path, db_name: str, multicol_start: int, exc_row_start: int, default_proc_attr_dict: Dict):
