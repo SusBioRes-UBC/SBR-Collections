@@ -3,10 +3,10 @@ This script outputs the LCIA results of interest for a given selection of activi
 	- currently only support ecoinvent db, acceptiable names
 		* "ei35_cutoff"
 		* "ei36_cutoff"
+		* "ei371_cutoff"
 	- through a config file, this script can:
 		* execute LCA calculations for multiple (1) activities, (2) impacts assessment methods
 
-Project name: "SE-EmbodiedImpacts"
 
 """
 
@@ -32,7 +32,7 @@ House keeping
 =============
 """
 # currently supported db
-db_supported = ["ei35_cutoff","ei36_cutoff"]
+db_supported = ["ei35_cutoff","ei36_cutoff","ei371_cutoff"]
 
 # [caution] run the following code lock, ONLY when impact assessment methods are not properly created
 #create_default_biosphere3()
@@ -72,7 +72,7 @@ def search_ei_act(ei_act_overview_df: pd.DataFrame, keywords_list: list) -> pd.D
 			# [CAUTION] this may lead to multiple duplicated entries, as'activity_overview_3.6_undefined_public_1.xlsx' include the same activity for 
 			#   each 'product name', if there are multiple products coming out of the same activity -> there will be mulitiple duplicated LCA results ->
 			#   longer runtime and duplicate rows in the output file
-			if (act_loc_tuple[0].lower() in avail_act_loc_tuple[0].lower()) and (act_loc_tuple[1].lower() == avail_act_loc_tuple[1].lower()):
+			if (act_loc_tuple[0].lower() in avail_act_loc_tuple[0].lower()) and (act_loc_tuple[1].lower() == avail_act_loc_tuple[1].lower() or act_loc_tuple [1].lower() == 'unspecified'):
 				act_identified_dict['name'].append(avail_act_loc_tuple[0])
 				act_identified_dict['location'].append(avail_act_loc_tuple[1])
 
@@ -111,7 +111,8 @@ def calc_lca(act_sheet: pd.DataFrame, lcia_method_sheet: pd.DataFrame, imported_
 	lcia_results = np.zeros((len(act_list),len(lcia_methods)))
 
 	# creat the technosphere matrix for faster calculation
-	lca = LCA({act_list[0]: 1}, method=lcia_methods[0])
+	tmp_amt = next(iter(act_list[0].production()))['amount'] # https://stackoverflow.com/questions/68133565/negative-production-for-end-of-life-treatment-process
+	lca = LCA({act_list[0]: tmp_amt}, method=lcia_methods[0])
 	lca.lci()
 	lca.decompose_technosphere() # A=LU speeds up the calculation, but when new technosphere matrix A is created, need to re-decompose
 	lca.lcia() # load the method data
@@ -124,7 +125,9 @@ def calc_lca(act_sheet: pd.DataFrame, lcia_method_sheet: pd.DataFrame, imported_
 
 	# loop over all activities of interest
 	for idx_1, act in enumerate(act_list):
-		lca.redo_lci({act:1})
+		# update tmp_amt
+		tmp_amt = next(iter(act.production()))['amount']
+		lca.redo_lci({act:tmp_amt})
 		#print(act)
 		for idx_2, matrix in enumerate(char_matrices):
 			lcia_results[idx_1,idx_2] = (matrix * lca.inventory).sum()
@@ -143,81 +146,87 @@ def calc_lca(act_sheet: pd.DataFrame, lcia_method_sheet: pd.DataFrame, imported_
 	return lcia_results_df
 
 
-"""
-======================
-Parse input arguments
-=======================
-"""
-# set up arguments
-ap = argparse.ArgumentParser()
-ap.add_argument("-p", "--projectname", help="name of the project", required=True) # add an argument for project name
-#ap.add_argument("-c", "--config", help="path to the configure file", required=True) # add an argument for path to the config file
-# instead of asking user to input the values for the following arguments, read them from the config file
-#ap.add_argument("-d", "--database", help="name of the ecoinvent database to use", required=True), # add an arguement for ei db name
-#ap.add_argument("-o", "--output", help="path the folder for output results", required=False) # add an optinal argument for path to the output folder
+if __name__ == '__main__':
+	"""
+	======================
+	Parse input arguments
+	=======================
+	"""
+	# set up arguments
+	ap = argparse.ArgumentParser()
+	ap.add_argument("-p", "--projectname", help="name of the project", required=True) # add an argument for project name
+	#ap.add_argument("-c", "--config", help="path to the configure file", required=True) # add an argument for path to the config file
+	# instead of asking user to input the values for the following arguments, read them from the config file
+	#ap.add_argument("-d", "--database", help="name of the ecoinvent database to use", required=True), # add an arguement for ei db name
+	#ap.add_argument("-o", "--output", help="path the folder for output results", required=False) # add an optinal argument for path to the output folder
 
-# parse arguments
-args = vars(ap.parse_args())
+	# parse arguments
+	args = vars(ap.parse_args())
 
-# load information of interest
-lcia_method_sheet = pd.read_excel(SE_config.LCA_MODELS,sheet_name="LCIA_methods")
-act_sheet = pd.read_excel(SE_config.LCA_MODELS,sheet_name="activities")
-ei_db_name = SE_config.EI_DB_NAME
-ei_db_path = SE_config.EI_DB_PATH
-ei_act_overview_df = pd.read_excel(SE_config.EI_OVERVIEW_FILE_PATH,sheet_name="activity overview")
-output_path = SE_config.OUTPUT_PATH
+	# load information of interest
+	lcia_method_sheet = pd.read_excel(SE_config.LCA_MODELS,sheet_name="LCIA_methods")
+	act_sheet = pd.read_excel(SE_config.LCA_MODELS,sheet_name="activities")
+	ei_db_name = SE_config.EI_DB_NAME
+	ei_db_path = SE_config.EI_DB_PATH
+	ei_act_overview_df = pd.read_excel(SE_config.EI_OVERVIEW_FILE_PATH,sheet_name="activity overview")
+	output_path = SE_config.OUTPUT_PATH
 
 
-"""
-==================
-Set up the project
-==================
-"""
-if not (args["projectname"] in projects):
-	print("The project name you entered does not match any of the existing ones!!", "\n")
-	user_response = input("Do you want to create the project? [y/n]")
-	if user_response.lower() in ['yes','y']:
-		projects.set_current(args["projectname"])
+	"""
+	==================
+	Set up the project
+	==================
+	"""
+	if not (args["projectname"] in projects):
+		print("The project name you entered does not match any of the existing ones!!", "\n")
+		user_response = input("Do you want to create the project? [y/n]")
+		if user_response.lower() in ['yes','y']:
+			projects.set_current(args["projectname"])
+		else:
+			sys.exit() # terminate the thread       
+
+	# set up db
+	bw2setup()
+
+	# import ecoinvent db, if it has not been imported
+	if ei_db_name in db_supported:
+		# check if the ei db already imported
+		if ei_db_name in databases:
+			print(f"[caution] {ei_db_name} alraedy imported!!", "\n")
+		else:
+			db = SingleOutputEcospold2Importer(ei_db_path,ei_db_name, use_mp=False)
+			db.apply_strategies()
+			db.statistics()
+			db.write_database()
 	else:
-		sys.exit() # terminate the thread       
+		print(f"[caution] the db name you provided does not match any of the following: {db_supported}!!", "\n")
 
-# set up db
-bw2setup()
-
-# import ecoinvent db, if it has not been imported
-if ei_db_name in db_supported:
-	# check if the ei db already imported
-	if ei_db_name in databases:
-		print("[caution] db alraedy imported!!", "\n")
-	else:
-		db = SingleOutputEcospold2Importer(ei_db_path,ei_db_name, use_mp=False)
-		db.apply_strategies()
-		db.statistics()
-		db.write_database()
-else:
-	print(f"[caution] the db name you provided does not match any of the following: {db_supported}!!", "\n")
-
-# set database to use
-db = Database(ei_db_name)
+	# set database to use
+	db = Database(ei_db_name)
 
 
-"""
-==========================
-Output the LCIA results
-==========================
-"""
-# add additional activities of interest by searching through the ecoinvent activities overview sheet
-keywords_list = [('wood','GLO'), ] #('WOOD', 'CH'), ('STEEL', 'GLO'), ('STEEL', 'ROW')
-act_identified_df = search_ei_act(ei_act_overview_df,keywords_list)
-#print(act_identified_df)
+	"""
+	==========================
+	Output the LCIA results
+	==========================
+	"""
+	# add additional activities of interest by searching through the ecoinvent activities overview sheet
+	keywords_list = [('wood','unspecified'),('steel', 'unspecified'),('concrete', 'unspecified'), ('aluminium', 'unspecified'),('paper', 'unspecified'),('straw', 'unspecified'),
+					('cement','unspecified'),('aggregates','unspecified'),('brick','unspecified'),('copper','unspecified'),('mortar','unspecified'),('asphalt','unspecified'),
+					('glass','unspecified'),('bitumen','unspecified'),('plastics','unspecified'),('carpet','unspecified'),('mineral','unspecified'),('clay','unspecified'), ('fill','unspecified'),
+					('siding','unspecified'),('ceramic','unspecified'),('pvc','unspecified'),('plaster','unspecified'),('stone','unspecified'),('asbestos','unspecified'),('polystyrene','unspecified'),
+					('heraklith','unspecified'),('lineoleum','unspecified'),('adobe','unspecified'),('gypsum','unspecified'),('wool','unspecified'),('insulation','unspecified'),
+					('polyvinylchloride','unspecified'), ('gravel','unspecified')] 
+	act_identified_df = search_ei_act(ei_act_overview_df,keywords_list)
+	#print(act_identified_df)
 
-act_sheet = pd.concat([act_sheet,act_identified_df])
-#print(act_sheet)
+	act_sheet = pd.concat([act_sheet,act_identified_df])
+	#print(act_sheet)
 
-# calculate the LCIA results
-lcia_results_df = calc_lca(act_sheet,lcia_method_sheet, db)
-#print (lcia_results_df)
+	# calculate the LCIA results
+	lcia_results_df = calc_lca(act_sheet,lcia_method_sheet, db)
+	#print (lcia_results_df)
 
-# exprot the results as .csv file
-export_name = 'LCA results.csv'
-lcia_results_df.to_csv(os.path.sep.join([output_path,export_name]))
+	# exprot the results as .csv file
+	export_name = 'LCA results.csv'
+	lcia_results_df.to_csv(os.path.sep.join([output_path,export_name]))
